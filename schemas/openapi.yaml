@@ -1,0 +1,1166 @@
+openapi: 3.1.0
+
+info:
+  title: Lifestyle Mapper API
+  version: 1.0.0
+  description: |
+    イベント終演時刻を起点に、移動・飲食・宿泊を一続きのタイムラインとして提案する API。
+
+    ## 設計上の不変条件
+    - **時刻はすべて RFC3339（オフセット必須）**。`event.endsAt` が全計算の起点。
+    - **金額はすべて整数の JPY**。小数・通貨記号・カンマは含めない。
+    - **`narrative` フィールドのみが LLM 由来**。それ以外の全フィールドは Go が外部 API
+      の実測値から確定させた事実であり、LLM は書き換えられない（Hydrator が保証）。
+    - `POST /v1/plans` は 202 を返す非同期 API。進捗は SSE で購読する。
+  contact:
+    name: Lifestyle Mapper
+  license:
+    name: UNLICENSED
+
+servers:
+  - url: http://localhost:8080
+    description: ローカル開発
+  - url: https://api.lifestyle-mapper.app
+    description: 本番
+
+tags:
+  - name: plans
+    description: プラン生成・取得
+  - name: clicks
+    description: アフィリエイトクリック計測
+  - name: system
+    description: ヘルスチェック
+
+paths:
+  /v1/plans:
+    post:
+      tags: [plans]
+      operationId: createPlan
+      summary: プラン生成を開始する
+      description: |
+        検索条件を受け取り、プラン生成ジョブを開始して即座に `planId` を返す。
+        外部 API 3 種 + LLM で合計 8〜15 秒かかるため同期では返さない。
+        進捗は `GET /v1/plans/{planId}/events` (SSE) で購読する。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchRequest'
+      responses:
+        '202':
+          description: 生成ジョブを受け付けた
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanCreatedEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/plans/{planId}:
+    get:
+      tags: [plans]
+      operationId: getPlan
+      summary: プランを取得する
+      description: |
+        生成中の場合も 200 を返し、`data.status` で進捗を示す。
+        `status` が `completed` / `partial` 以外のとき `timeline` は空配列または部分配列になる。
+      parameters:
+        - $ref: '#/components/parameters/PlanId'
+      responses:
+        '200':
+          description: プラン（生成中を含む）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          description: プランの有効期限（expiresAt）が切れている
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/plans/{planId}/events:
+    get:
+      tags: [plans]
+      operationId: streamPlanEvents
+      summary: プラン生成の進捗を SSE で購読する
+      description: |
+        `text/event-stream`。イベント名と data は以下の通り。
+
+        | event      | data                                   |
+        |------------|----------------------------------------|
+        | `status`   | `{ "status": "collecting" }`           |
+        | `sources`  | `SourceStatus`（各 API が返り次第 1 件ずつ） |
+        | `plan`     | `Plan`（完成時に 1 回。GET と同一形状）   |
+        | `error`    | `ErrorBody`                            |
+
+        `plan` または `error` の送信後、サーバはストリームを閉じる。
+      parameters:
+        - $ref: '#/components/parameters/PlanId'
+      responses:
+        '200':
+          description: SSE ストリーム
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/clicks:
+    post:
+      tags: [clicks]
+      operationId: recordClick
+      summary: アフィリエイトリンクのクリックを記録する
+      description: |
+        フロントの `AffiliateLink` コンポーネントからのみ呼ばれる。
+        リンク遷移をブロックしないよう `sendBeacon` / `keepalive` での送信を想定し、
+        本文の検証に失敗しても 204 を返す（計測のためにユーザー体験を止めない）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClickRequest'
+      responses:
+        '204':
+          description: 記録した（検証失敗時も 204）
+
+  /health:
+    get:
+      tags: [system]
+      operationId: getHealth
+      summary: ヘルスチェック
+      responses:
+        '200':
+          description: 正常
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  version:
+                    type: string
+
+components:
+  parameters:
+    PlanId:
+      name: planId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/PlanId'
+
+  responses:
+    BadRequest:
+      description: リクエストが不正
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFound:
+      description: 対象が存在しない
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    TooManyRequests:
+      description: レート制限
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    InternalError:
+      description: サーバ内部エラー
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+
+  schemas:
+
+    # ────────────────────────────────────────────────────────────
+    # 共通プリミティブ
+    # ────────────────────────────────────────────────────────────
+    PlanId:
+      type: string
+      pattern: '^pln_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID ベースのプラン ID
+      examples: ['pln_01HX8Z9K3M4N5P6Q7R8S9T0V1W']
+
+    CandidateId:
+      type: string
+      pattern: '^cand_(dining|lodging|spot)_[0-9]{3}$'
+      description: |
+        FactStore が採番する候補 ID。**LLM が参照できる唯一の識別子**であり、
+        Hydrator は FactStore に存在しない ID を含む LLM 出力を棄却する。
+      examples: ['cand_dining_003']
+
+    Location:
+      type: object
+      additionalProperties: false
+      required: [lat, lng]
+      properties:
+        lat:
+          type: number
+          minimum: -90
+          maximum: 90
+        lng:
+          type: number
+          minimum: -180
+          maximum: 180
+
+    MoneyRangeJpy:
+      type: object
+      additionalProperties: false
+      properties:
+        min:
+          type: integer
+          minimum: 0
+          default: 0
+        max:
+          type: integer
+          minimum: 0
+      description: 円（整数）。`max` 省略は上限なし。
+
+    # ────────────────────────────────────────────────────────────
+    # A. リクエスト — ユーザー検索条件
+    # ────────────────────────────────────────────────────────────
+    SearchRequest:
+      type: object
+      additionalProperties: false
+      required: [event, situation]
+      properties:
+        event:
+          $ref: '#/components/schemas/EventInput'
+        party:
+          $ref: '#/components/schemas/PartyInput'
+        situation:
+          $ref: '#/components/schemas/SituationInput'
+        dining:
+          $ref: '#/components/schemas/DiningPreference'
+        lodging:
+          $ref: '#/components/schemas/LodgingPreference'
+        returnTrip:
+          $ref: '#/components/schemas/ReturnTripPreference'
+        options:
+          $ref: '#/components/schemas/PlanOptions'
+        context:
+          $ref: '#/components/schemas/RequestContext'
+
+    EventInput:
+      type: object
+      additionalProperties: false
+      required: [venue, endsAt]
+      properties:
+        eventId:
+          type: [string, 'null']
+          default: null
+          description: イベントマスタ参照時のみ。手入力なら null。
+        name:
+          type: string
+          maxLength: 120
+          examples: ['○○ TOUR 2026 東京公演']
+        venue:
+          $ref: '#/components/schemas/VenueInput'
+        endsAt:
+          type: string
+          format: date-time
+          description: |
+            **全計算の起点**。RFC3339 かつオフセット必須。過去日時は 400。
+          examples: ['2026-09-12T21:00:00+09:00']
+        exitBufferMinutes:
+          type: integer
+          minimum: 0
+          maximum: 120
+          default: 30
+          description: 規制退場・物販待ちの余裕（分）。
+
+    VenueInput:
+      type: object
+      additionalProperties: false
+      required: [name, location]
+      properties:
+        name:
+          type: string
+          maxLength: 120
+          examples: ['東京ドーム']
+        address:
+          type: string
+          maxLength: 200
+        location:
+          $ref: '#/components/schemas/Location'
+        googlePlaceId:
+          type: [string, 'null']
+          description: あれば経路精度が上がる。
+          examples: ['ChIJK1kFhcSMGGARFwQMs73Kejo']
+
+    PartyInput:
+      type: object
+      additionalProperties: false
+      properties:
+        adults:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 2
+        children:
+          type: integer
+          minimum: 0
+          maximum: 20
+          default: 0
+        relationship:
+          type: string
+          enum: [solo, couple, friends, family]
+          default: friends
+
+    SituationInput:
+      description: |
+        **このアプリの差別化点**。`mood` と `notes` は Go の絞り込みには一切使わず、
+        LLM のプロンプトにのみ渡して文章生成の文脈にする。
+      type: object
+      additionalProperties: false
+      required: [intent]
+      properties:
+        intent:
+          type: string
+          enum: [stay, return, either]
+          description: stay=宿泊前提 / return=帰宅前提 / either=Go が終電可否で判断
+        mood:
+          type: array
+          maxItems: 4
+          items:
+            type: string
+            enum: [celebrate, relaxed, efficient, budget]
+          default: []
+        notes:
+          type: string
+          maxLength: 200
+          description: 自由記述。LLM へそのまま渡すためプロンプトインジェクション対策の対象。
+          examples: ['初めての遠征で土地勘がありません。荷物が多めです。']
+        physicalLimit:
+          type: object
+          additionalProperties: false
+          properties:
+            maxWalkMinutes:
+              type: integer
+              minimum: 1
+              maximum: 60
+              default: 15
+
+    DiningPreference:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+          default: true
+        genres:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+            enum: [izakaya, ramen, yakiniku, sushi, cafe, bar, family_restaurant, fast_food, italian, chinese]
+          default: []
+        budgetPerPersonJpy:
+          $ref: '#/components/schemas/MoneyRangeJpy'
+        requirements:
+          type: array
+          items:
+            type: string
+            enum: [open_late, reservable, non_smoking, private_room, all_you_can_drink, vegetarian_ok]
+          default: []
+        desiredStayMinutes:
+          type: integer
+          minimum: 15
+          maximum: 240
+          default: 90
+
+    LodgingPreference:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+          default: true
+        checkInDate:
+          type: string
+          format: date
+          description: 日付のみが意味を持つため date 形式。
+        checkOutDate:
+          type: string
+          format: date
+        rooms:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 1
+        budgetPerNightJpy:
+          $ref: '#/components/schemas/MoneyRangeJpy'
+        requirements:
+          type: array
+          items:
+            type: string
+            enum: [no_smoking, late_checkin_ok, with_bath, large_bath, breakfast_included, coin_laundry, free_wifi]
+          default: []
+
+    ReturnTripPreference:
+      description: '`situation.intent` が return / either のときのみ有効。'
+      type: object
+      additionalProperties: false
+      properties:
+        destination:
+          type: object
+          additionalProperties: false
+          required: [type, name]
+          properties:
+            type:
+              type: string
+              enum: [station, address, airport]
+            name:
+              type: string
+              maxLength: 120
+              examples: ['新宿']
+        checkLastTrain:
+          type: boolean
+          default: true
+
+    PlanOptions:
+      type: object
+      additionalProperties: false
+      properties:
+        transportModes:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [WALK, TRANSIT, DRIVE, BICYCLE]
+          default: [WALK, TRANSIT]
+          description: Google Routes API の travelMode に対応。
+        maxCandidatesPerCategory:
+          type: integer
+          minimum: 3
+          maximum: 20
+          default: 8
+          description: |
+            **LLM 入力トークン量を直接決めるコスト制御ノブ**。
+            8 件 x 3 カテゴリで入力 3〜5K トークン程度。
+        llmNarrative:
+          type: boolean
+          default: true
+          description: false なら LLM をスキップし、ルールベースで時系列のみ組む。
+
+    RequestContext:
+      type: object
+      additionalProperties: false
+      properties:
+        locale:
+          type: string
+          default: ja-JP
+        currency:
+          type: string
+          enum: [JPY]
+          default: JPY
+        timezone:
+          type: string
+          default: Asia/Tokyo
+
+    # ────────────────────────────────────────────────────────────
+    # B. レスポンス — 最終タイムライン
+    # ────────────────────────────────────────────────────────────
+    PlanCreatedEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [planId, status]
+          properties:
+            planId:
+              $ref: '#/components/schemas/PlanId'
+            status:
+              $ref: '#/components/schemas/PlanStatus'
+            streamUrl:
+              type: string
+              format: uri-reference
+              examples: ['/v1/plans/pln_01HX8Z9K3M4N5P6Q7R8S9T0V1W/events']
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    PlanEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: '#/components/schemas/Plan'
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    PlanStatus:
+      type: string
+      enum: [queued, collecting, composing, completed, partial, failed]
+      description: |
+        queued → collecting（3 API 並行取得中）→ composing（LLM 生成中）→ completed。
+        一部プロバイダが落ちても組めた場合は partial。
+
+    Plan:
+      type: object
+      additionalProperties: false
+      required: [planId, status, generatedAt, narrative, summary, timeline, alternatives, warnings]
+      properties:
+        planId:
+          $ref: '#/components/schemas/PlanId'
+        status:
+          $ref: '#/components/schemas/PlanStatus'
+        generatedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+          description: |
+            **空室情報の鮮度保証**。既定 15 分。期限切れをフロントが検知して再検索を促し、
+            「クリックしたら満室だった」という最も痛い離脱を防ぐ。
+        shareUrl:
+          type: string
+          format: uri
+        narrative:
+          oneOf:
+            - $ref: '#/components/schemas/PlanNarrative'
+            - type: 'null'
+          description: 'LLM 由来。options.llmNarrative が false のとき、および LLM 全滅時は null。'
+        summary:
+          $ref: '#/components/schemas/PlanSummary'
+        timeline:
+          type: array
+          items:
+            $ref: '#/components/schemas/Segment'
+        alternatives:
+          $ref: '#/components/schemas/Alternatives'
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/Warning'
+
+    PlanNarrative:
+      description: '**LLM が生成した文章のみ**を格納する。事実は一切含まない。'
+      type: object
+      additionalProperties: false
+      required: [title, summary]
+      properties:
+        title:
+          type: string
+          maxLength: 60
+          examples: ['終演の余韻を、水道橋の深夜に持ち帰る']
+        summary:
+          type: string
+          maxLength: 300
+        closingNote:
+          type: [string, 'null']
+          maxLength: 300
+        vibe:
+          type: [string, 'null']
+          maxLength: 40
+          examples: ['relaxed_late_night']
+
+    PlanSummary:
+      description: '**Go が確定した事実のみ**。LLM は書き込めない。'
+      type: object
+      additionalProperties: false
+      required: [startAt, endAt, totalWalkMinutes, totalWalkMeters, estimatedCostJpy, feasibility]
+      properties:
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        totalWalkMinutes:
+          type: integer
+          minimum: 0
+        totalWalkMeters:
+          type: integer
+          minimum: 0
+        estimatedCostJpy:
+          type: object
+          additionalProperties: false
+          required: [total]
+          properties:
+            dining:
+              type: integer
+              minimum: 0
+            lodging:
+              type: integer
+              minimum: 0
+            transit:
+              type: integer
+              minimum: 0
+            total:
+              type: integer
+              minimum: 0
+        feasibility:
+          type: string
+          enum: [ok, tight, infeasible]
+          description: tight = 乗り換え・入店の余裕が 5 分未満の箇所がある。
+
+    SegmentNarrative:
+      description: '**LLM 由来**。UI から消しても機能が落ちない層。'
+      type: object
+      additionalProperties: false
+      required: [headline]
+      properties:
+        headline:
+          type: string
+          maxLength: 40
+        reason:
+          type: [string, 'null']
+          maxLength: 200
+        tip:
+          type: [string, 'null']
+          maxLength: 200
+
+    SegmentBase:
+      type: object
+      required: [id, type, startAt, endAt, durationMinutes, narrative]
+      properties:
+        id:
+          type: string
+          pattern: '^seg_[0-9]+$'
+        type:
+          $ref: '#/components/schemas/SegmentType'
+        startAt:
+          type: string
+          format: date-time
+          description: Go の timecalc が endsAt 起点で累積計算した絶対時刻。
+        endAt:
+          type: string
+          format: date-time
+        durationMinutes:
+          type: integer
+          minimum: 0
+        narrative:
+          oneOf:
+            - $ref: '#/components/schemas/SegmentNarrative'
+            - type: 'null'
+
+    SegmentType:
+      type: string
+      enum: [buffer, move, dining, lodging]
+
+    Segment:
+      description: '`type` による判別可能ユニオン。フロントの SegmentCard が唯一のディスパッチャ。'
+      oneOf:
+        - $ref: '#/components/schemas/BufferSegment'
+        - $ref: '#/components/schemas/MoveSegment'
+        - $ref: '#/components/schemas/DiningSegment'
+        - $ref: '#/components/schemas/LodgingSegment'
+      discriminator:
+        propertyName: type
+        mapping:
+          buffer: '#/components/schemas/BufferSegment'
+          move: '#/components/schemas/MoveSegment'
+          dining: '#/components/schemas/DiningSegment'
+          lodging: '#/components/schemas/LodgingSegment'
+
+    BufferSegment:
+      allOf:
+        - $ref: '#/components/schemas/SegmentBase'
+        - type: object
+          required: [type, buffer]
+          properties:
+            type:
+              const: buffer
+            buffer:
+              $ref: '#/components/schemas/BufferDetail'
+
+    MoveSegment:
+      allOf:
+        - $ref: '#/components/schemas/SegmentBase'
+        - type: object
+          required: [type, move]
+          properties:
+            type:
+              const: move
+            move:
+              $ref: '#/components/schemas/MoveDetail'
+
+    DiningSegment:
+      allOf:
+        - $ref: '#/components/schemas/SegmentBase'
+        - type: object
+          required: [type, dining, links]
+          properties:
+            type:
+              const: dining
+            dining:
+              $ref: '#/components/schemas/DiningDetail'
+            links:
+              type: array
+              items:
+                $ref: '#/components/schemas/Link'
+
+    LodgingSegment:
+      allOf:
+        - $ref: '#/components/schemas/SegmentBase'
+        - type: object
+          required: [type, lodging, links]
+          properties:
+            type:
+              const: lodging
+            lodging:
+              $ref: '#/components/schemas/LodgingDetail'
+            links:
+              type: array
+              items:
+                $ref: '#/components/schemas/Link'
+
+    BufferDetail:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [exit_congestion, goods_queue, spare_time]
+        atPlaceName:
+          type: string
+
+    MoveDetail:
+      description: '**Google Routes API 由来（LLM 不可侵）**。'
+      type: object
+      additionalProperties: false
+      required: [travelMode, distanceMeters, durationMinutes, from, to]
+      properties:
+        travelMode:
+          type: string
+          enum: [WALK, TRANSIT, DRIVE, BICYCLE]
+        distanceMeters:
+          type: integer
+          minimum: 0
+        durationMinutes:
+          type: integer
+          minimum: 0
+        from:
+          $ref: '#/components/schemas/Waypoint'
+        to:
+          $ref: '#/components/schemas/Waypoint'
+        encodedPolyline:
+          type: [string, 'null']
+          description: 地図描画用のエンコード済みポリライン。
+        mapsUrl:
+          type: [string, 'null']
+          format: uri
+        transitLegs:
+          type: array
+          default: []
+          items:
+            $ref: '#/components/schemas/TransitLeg'
+
+    Waypoint:
+      type: object
+      additionalProperties: false
+      required: [name, location]
+      properties:
+        name:
+          type: string
+        location:
+          $ref: '#/components/schemas/Location'
+
+    TransitLeg:
+      description: travelMode が TRANSIT のときのみ。
+      type: object
+      additionalProperties: false
+      required: [lineName, departureStop, arrivalStop]
+      properties:
+        lineName:
+          type: string
+          examples: ['JR中央・総武線']
+        headsign:
+          type: [string, 'null']
+        departureStop:
+          type: string
+        arrivalStop:
+          type: string
+        departureAt:
+          type: [string, 'null']
+          format: date-time
+        arrivalAt:
+          type: [string, 'null']
+          format: date-time
+        numStops:
+          type: [integer, 'null']
+          minimum: 0
+        fareJpy:
+          type: [integer, 'null']
+          minimum: 0
+
+    DiningDetail:
+      description: '**Google Places API 由来（LLM 不可侵）**。'
+      type: object
+      additionalProperties: false
+      required: [candidateId, providerPlaceId, name, location]
+      properties:
+        candidateId:
+          $ref: '#/components/schemas/CandidateId'
+        providerPlaceId:
+          type: string
+        name:
+          type: string
+        genres:
+          type: array
+          items:
+            type: string
+          default: []
+        rating:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 5
+        userRatingCount:
+          type: [integer, 'null']
+          minimum: 0
+        priceLevel:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 4
+        estimatedCostPerPersonJpy:
+          type: [integer, 'null']
+          minimum: 0
+        address:
+          type: [string, 'null']
+        location:
+          $ref: '#/components/schemas/Location'
+        photoUrl:
+          type: [string, 'null']
+          format: uri
+          description: Places の写真は自前 CDN 経由でプロキシする（キー秘匿とキャッシュのため）。
+        phoneNumber:
+          type: [string, 'null']
+        openingStatus:
+          oneOf:
+            - $ref: '#/components/schemas/OpeningStatus'
+            - type: 'null'
+
+    OpeningStatus:
+      type: object
+      additionalProperties: false
+      required: [openNow]
+      properties:
+        openNow:
+          type: boolean
+          description: 到着予定時刻（現在時刻ではない）における営業判定。
+        opensAt:
+          type: [string, 'null']
+          format: date-time
+        closesAt:
+          type: [string, 'null']
+          format: date-time
+
+    LodgingDetail:
+      description: '**楽天トラベル API 由来（LLM 不可侵）**。'
+      type: object
+      additionalProperties: false
+      required: [candidateId, providerHotelId, name, location, plan]
+      properties:
+        candidateId:
+          $ref: '#/components/schemas/CandidateId'
+        providerHotelId:
+          type: string
+        name:
+          type: string
+        reviewAverage:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 5
+        reviewCount:
+          type: [integer, 'null']
+          minimum: 0
+        address:
+          type: [string, 'null']
+        location:
+          $ref: '#/components/schemas/Location'
+        photoUrl:
+          type: [string, 'null']
+          format: uri
+        plan:
+          $ref: '#/components/schemas/LodgingPlanDetail'
+
+    LodgingPlanDetail:
+      type: object
+      additionalProperties: false
+      required: [providerPlanId, planName, totalPriceJpy, vacancyStatus]
+      properties:
+        providerPlanId:
+          type: string
+        planName:
+          type: string
+        roomName:
+          type: [string, 'null']
+        totalPriceJpy:
+          type: integer
+          minimum: 0
+        pricePerPersonJpy:
+          type: [integer, 'null']
+          minimum: 0
+        vacancyStatus:
+          type: string
+          enum: [available, few_left, sold_out]
+        remainingRooms:
+          type: [integer, 'null']
+          minimum: 0
+        checkInTime:
+          type: [string, 'null']
+          examples: ['15:00']
+        checkInDeadline:
+          type: [string, 'null']
+          description: 24 時超えを 26:00 のように表記する提供元仕様をそのまま保持する。
+          examples: ['26:00']
+        checkOutTime:
+          type: [string, 'null']
+          examples: ['10:00']
+        amenities:
+          type: array
+          items:
+            type: string
+          default: []
+
+    Link:
+      description: |
+        **収益がかかっている唯一の出口**。素の URL 文字列を置かず必ずこの構造にすることで、
+        ASP 追加時の全画面改修を防ぎ、`rel="sponsored"` とクリック計測を
+        `AffiliateLink` コンポーネント 1 つで担保する。
+      type: object
+      additionalProperties: false
+      required: [kind, provider, label, url]
+      properties:
+        kind:
+          type: string
+          enum: [affiliate, official, tel, map]
+        provider:
+          type: string
+          enum: [rakuten_travel, hotpepper, gurunavi, google_maps, direct]
+        label:
+          type: string
+          maxLength: 30
+        url:
+          type: string
+          description: 'affiliate の場合は完成済みアフィリエイト URL。tel の場合は tel: スキーム。'
+        trackingId:
+          type: [string, 'null']
+          description: POST /v1/clicks に送る計測 ID。kind=affiliate では必須。
+
+    Alternatives:
+      description: UI の AlternativePicker が使う差し替え候補。
+      type: object
+      additionalProperties: false
+      properties:
+        dining:
+          type: array
+          default: []
+          items:
+            $ref: '#/components/schemas/DiningAlternative'
+        lodging:
+          type: array
+          default: []
+          items:
+            $ref: '#/components/schemas/LodgingAlternative'
+
+    DiningAlternative:
+      allOf:
+        - $ref: '#/components/schemas/DiningDetail'
+        - type: object
+          properties:
+            excludedReason:
+              type: [string, 'null']
+              description: LLM の unusedCandidateNotes 由来。採用しなかった理由。
+            links:
+              type: array
+              items:
+                $ref: '#/components/schemas/Link'
+
+    LodgingAlternative:
+      allOf:
+        - $ref: '#/components/schemas/LodgingDetail'
+        - type: object
+          properties:
+            excludedReason:
+              type: [string, 'null']
+            links:
+              type: array
+              items:
+                $ref: '#/components/schemas/Link'
+
+    Warning:
+      type: object
+      additionalProperties: false
+      required: [code, severity, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - VACANCY_LOW
+            - LAST_TRAIN_MISSED
+            - NO_LODGING_FOUND
+            - NO_DINING_FOUND
+            - WALK_LIMIT_EXCEEDED
+            - BUDGET_EXCEEDED
+            - PROVIDER_DEGRADED
+            - LLM_UNAVAILABLE
+            - TIGHT_SCHEDULE
+        severity:
+          type: string
+          enum: [info, warning, critical]
+        segmentId:
+          type: [string, 'null']
+        message:
+          type: string
+
+    # ────────────────────────────────────────────────────────────
+    # meta / error
+    # ────────────────────────────────────────────────────────────
+    Meta:
+      description: |
+        並行 fan-out の部分失敗を隠さず返すための観測情報。
+        楽天が落ちても飲食店だけ返して `partial` にするほうが、全体 500 より UX が良い。
+      type: object
+      additionalProperties: false
+      required: [requestId]
+      properties:
+        requestId:
+          type: string
+        sources:
+          type: array
+          default: []
+          items:
+            $ref: '#/components/schemas/SourceStatus'
+        llm:
+          oneOf:
+            - $ref: '#/components/schemas/LlmMeta'
+            - type: 'null'
+
+    SourceStatus:
+      type: object
+      additionalProperties: false
+      required: [provider, status, latencyMs, cached]
+      properties:
+        provider:
+          type: string
+          enum: [google_places, google_routes, rakuten_travel]
+        status:
+          type: string
+          enum: [ok, degraded, failed, skipped]
+        latencyMs:
+          type: integer
+          minimum: 0
+        cached:
+          type: boolean
+        resultCount:
+          type: integer
+          minimum: 0
+          default: 0
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/ErrorBody'
+            - type: 'null'
+
+    LlmMeta:
+      type: object
+      additionalProperties: false
+      required: [provider, model, schemaVersion, promptVersion]
+      properties:
+        provider:
+          type: string
+          enum: [anthropic, google, rule_based]
+        model:
+          type: string
+          examples: ['claude-opus-5']
+        schemaVersion:
+          type: string
+          examples: ['plan_output.v1']
+        promptVersion:
+          type: string
+          examples: ['plan_v1']
+        latencyMs:
+          type: integer
+          minimum: 0
+        inputTokens:
+          type: integer
+          minimum: 0
+        outputTokens:
+          type: integer
+          minimum: 0
+        repairAttempts:
+          type: integer
+          minimum: 0
+          default: 0
+          description: |
+            Validator 不合格による再生成回数。**プロンプト品質の実測値**なので
+            CloudWatch に流して改善サイクルを回す。
+
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorBody'
+
+    ErrorBody:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          examples: ['VALIDATION_FAILED']
+        message:
+          type: string
+        details:
+          type: array
+          default: []
+          items:
+            type: object
+            additionalProperties: false
+            required: [field, reason]
+            properties:
+              field:
+                type: string
+              reason:
+                type: string
+        requestId:
+          type: [string, 'null']
+
+    ClickRequest:
+      type: object
+      additionalProperties: false
+      required: [planId, trackingId]
+      properties:
+        planId:
+          $ref: '#/components/schemas/PlanId'
+        segmentId:
+          type: [string, 'null']
+        trackingId:
+          type: string
+        provider:
+          type: string
+          enum: [rakuten_travel, hotpepper, gurunavi, google_maps, direct]
+        clickedAt:
+          type: string
+          format: date-time

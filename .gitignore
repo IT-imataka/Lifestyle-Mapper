@@ -1,0 +1,37 @@
+# 依存
+node_modules/
+vendor/
+
+# ビルド成果物
+.next/
+out/
+dist/
+/backend/bin/
+/backend/tmp/
+
+# 環境変数（APIキーが入るため絶対にコミットしない）
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+
+# OS / エディタ
+.DS_Store
+*.swp
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# ログ・カバレッジ
+*.log
+coverage.out
+
+# 秘匿プロンプト
+plan_v1.md.tmpl

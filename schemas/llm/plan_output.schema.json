@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lifestyle-mapper.app/schemas/llm/plan_output.v1.json",
+  "title": "PlanDraft",
+  "description": "Composer が LLM に強制する中間契約。フロントには出ない。LLM は candidateId の参照と日本語の文章のみを書き、店名・住所・価格・URL・営業時間・絶対時刻は一切書かない。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "planTitle",
+    "planSummary",
+    "vibe",
+    "steps",
+    "closingNote",
+    "unusedCandidateNotes"
+  ],
+  "properties": {
+    "planTitle": {
+      "type": "string",
+      "description": "プラン全体のキャッチコピー。30文字以内の日本語。体言止めまたは短い文。店名は含めない。"
+    },
+    "planSummary": {
+      "type": "string",
+      "description": "プラン全体の要約。120文字以内の日本語2〜3文。移動の少なさや時間の余裕など、ユーザーが得る体験を書く。価格や店名は書かない。"
+    },
+    "vibe": {
+      "type": "string",
+      "enum": [
+        "relaxed_late_night",
+        "efficient_transit",
+        "celebration",
+        "budget_conscious",
+        "sightseeing_extended",
+        "quick_return"
+      ],
+      "description": "プランの性格。UI のテーマ色・アイコン選択に使う。"
+    },
+    "steps": {
+      "type": "array",
+      "description": "時系列順のステップ。order は 1 から連番。move は必ず 2 つの滞在ステップの間に置く。同一 candidateId を 2 回使ってはならない。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "order",
+          "kind",
+          "candidateId",
+          "stayMinutes",
+          "headline",
+          "reason",
+          "tip"
+        ],
+        "properties": {
+          "order": {
+            "type": "integer",
+            "description": "1 起点の連番。欠番・重複は不可。"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "buffer",
+              "move",
+              "dining",
+              "lodging"
+            ],
+            "description": "buffer=待機、move=移動、dining=飲食、lodging=宿泊。"
+          },
+          "candidateId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "入力で提示された候補の ID をそのまま転記する。dining / lodging では必須。buffer / move では必ず null。ここに提示されていない ID を書いてはならない。"
+          },
+          "stayMinutes": {
+            "type": "integer",
+            "description": "そのステップに費やす滞在時間（分）。0 以上 240 以下。move では必ず 0（移動時間はシステムが実測値で埋めるため）。lodging では必ず 0（翌朝までのため）。"
+          },
+          "headline": {
+            "type": "string",
+            "description": "このステップの見出し。20文字以内の日本語。"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "なぜこのステップ・この候補なのかの理由。80文字以内の日本語。入力で与えられた事実（営業終了時刻、徒歩分数、チェックイン最終時刻など）にのみ基づいて書く。与えられていない事実を創作してはならない。"
+          },
+          "tip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "実用的な助言。80文字以内の日本語。不要なら null。"
+          }
+        },
+        "description": "1 ステップ。kind に応じて candidateId と stayMinutes の扱いが変わる。"
+      }
+    },
+    "closingNote": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "プラン全体の締めの一言。100文字以内の日本語。どういう方針で組んだかを述べる。不要なら null。"
+    },
+    "unusedCandidateNotes": {
+      "type": "array",
+      "description": "採用しなかった候補のうち、ユーザーに理由を示す価値があるものを最大3件。UI の AlternativePicker に表示される。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "candidateId",
+          "reason"
+        ],
+        "properties": {
+          "candidateId": {
+            "type": "string",
+            "description": "入力で提示された候補の ID をそのまま転記する。"
+          },
+          "reason": {
+            "type": "string",
+            "description": "採用しなかった理由。60文字以内の日本語。入力の事実にのみ基づく。"
+          }
+        },
+        "description": "不採用候補 1 件とその理由。"
+      }
+    }
+  }
+}
