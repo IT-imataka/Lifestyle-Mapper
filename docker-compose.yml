@@ -7,14 +7,14 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_DB: lifestyle_mapper
-      POSTGRES_USER: 
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
     ports:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U app -d lifestyle_mapper"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d lifestyle_mapper"]
       interval: 5s
       timeout: 5s
       retries: 10

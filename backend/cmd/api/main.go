@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -9,9 +10,15 @@ import (
 	"os/signal"
 	"syscall"
 
+	_ "github.com/lib/pq"
 	"github.com/taka/lifestyle-mapper/backend/internal/config"
 	"github.com/taka/lifestyle-mapper/backend/internal/controller"
+	"github.com/taka/lifestyle-mapper/backend/internal/infrastructure/googleplaces"
+	"github.com/taka/lifestyle-mapper/backend/internal/infrastructure/googleroutes"
+	"github.com/taka/lifestyle-mapper/backend/internal/infrastructure/llm"
+	"github.com/taka/lifestyle-mapper/backend/internal/infrastructure/rakutentravel"
 	"github.com/taka/lifestyle-mapper/backend/internal/prompt"
+	"github.com/taka/lifestyle-mapper/backend/internal/repository"
 	"github.com/taka/lifestyle-mapper/backend/internal/router"
 	dev "github.com/taka/lifestyle-mapper/backend/internal/runtime"
 	planservice "github.com/taka/lifestyle-mapper/backend/internal/service/plan"
@@ -26,22 +33,57 @@ func main() {
 
 	logger := slog.Default()
 
-	// 開発向けの軽量実装を注入する。
-	// prompt builder
+	db, err := sql.Open("postgres", cfg.Database.URL.Value())
+	if err != nil {
+		logger.Error("database open failed", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		logger.Error("database ping failed", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	db.SetMaxOpenConns(cfg.Database.MaxOpenConns)
+	db.SetMaxIdleConns(cfg.Database.MaxIdleConns)
+	db.SetConnMaxLifetime(cfg.Database.ConnMaxLifetime)
+
 	builder := prompt.MustNew()
+	httpClient := &http.Client{}
 
-	// Collector: nil の依存は skipped 扱いになるため、外部呼び出しは行わない。
-	collector := planservice.NewCollector(planservice.CollectorDeps{}, planservice.CollectorOptions{})
+	collector := planservice.NewCollector(planservice.CollectorDeps{
+		Places: googleplaces.New(cfg.Google.MapsAPIKey.Value(), cfg.Google.PlacesTimeout, httpClient),
+		Hotels: rakutentravel.New(rakutentravel.Options{
+			ApplicationID: cfg.Rakuten.ApplicationID.Value(),
+			AffiliateID:   cfg.Rakuten.AffiliateID,
+			Timeout:       cfg.Rakuten.Timeout,
+			QPS:           cfg.Rakuten.QPS,
+			HTTPClient:    httpClient,
+		}),
+		Routes: googleroutes.New(cfg.Google.MapsAPIKey.Value(), cfg.Google.RoutesTimeout, httpClient),
+	}, planservice.CollectorOptions{
+		Timeout:                  cfg.Plan.CollectTimeout,
+		MaxCandidatesPerCategory: cfg.Plan.MaxCandidatesPerCategory,
+	})
 
-	repo := dev.NewInMemoryPlanRepository()
+	repo := repository.NewPlanRepository(db)
 	b := dev.NewBroadcaster()
+	chain := llm.NewChain()
 
 	svc := planservice.NewService(planservice.Deps{
 		Collector:  collector,
 		Repository: repo,
-		LLM:        nil,
+		LLM:        chain,
 		Prompt:     builder,
-	}, planservice.Options{LLMEnabled: false})
+	}, planservice.Options{
+		TTL:               cfg.Plan.TTL,
+		BaseURL:           cfg.App.BaseURL,
+		MaxRepairAttempts: cfg.LLM.MaxRepairAttempts,
+		LLMEnabled:        cfg.LLM.Enabled,
+		Compose: planservice.ComposeOptions{
+			MaxTokens: cfg.LLM.Anthropic.MaxTokens,
+			Effort:    cfg.LLM.Anthropic.Effort,
+		},
+	})
 
 	orchestrator := dev.NewPlanOrchestrator(svc, repo, b)
 
