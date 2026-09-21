@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS plans (
     dining_cost_jpy INTEGER DEFAULT 0,
     lodging_cost_jpy INTEGER DEFAULT 0,
     transit_cost_jpy INTEGER DEFAULT 0,
+    payload JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
