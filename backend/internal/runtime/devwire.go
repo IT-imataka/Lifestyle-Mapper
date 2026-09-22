@@ -126,7 +126,10 @@ func NewPlanOrchestrator(svc *planservice.Service, repo planservice.Repository, 
 func (o *PlanOrchestrator) Create(ctx context.Context, cond *model.SearchCondition) (model.PlanID, model.PlanStatus, error) {
 	id := model.NewPlanID()
 	p := &model.Plan{ID: id, Status: model.StatusQueued, GeneratedAt: time.Now(), ExpiresAt: time.Now().Add(5 * time.Minute)}
-	_ = o.repo.Save(ctx, p)
+	if err := o.repo.Save(ctx, p); err != nil {
+		o.b.Publish(model.NewErrorEvent(id, err, time.Now()))
+		return id, model.StatusQueued, err
+	}
 
 	o.b.Publish(model.NewStatusEvent(id, model.StatusQueued, time.Now()))
 
