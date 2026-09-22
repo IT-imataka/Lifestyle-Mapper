@@ -16,6 +16,8 @@ import (
 	"github.com/taka/lifestyle-mapper/backend/internal/infrastructure/googleplaces"
 	"github.com/taka/lifestyle-mapper/backend/internal/infrastructure/googleroutes"
 	"github.com/taka/lifestyle-mapper/backend/internal/infrastructure/llm"
+	anthropicclient "github.com/taka/lifestyle-mapper/backend/internal/infrastructure/llm/anthropic"
+	geminiclient "github.com/taka/lifestyle-mapper/backend/internal/infrastructure/llm/gemini"
 	"github.com/taka/lifestyle-mapper/backend/internal/infrastructure/rakutentravel"
 	"github.com/taka/lifestyle-mapper/backend/internal/prompt"
 	"github.com/taka/lifestyle-mapper/backend/internal/repository"
@@ -67,7 +69,25 @@ func main() {
 
 	repo := repository.NewPlanRepository(db)
 	b := dev.NewBroadcaster()
-	chain := llm.NewChain()
+
+	var providers []llm.Composer
+	if !cfg.LLM.Anthropic.APIKey.Empty() {
+		providers = append(providers, anthropicclient.New(
+			cfg.LLM.Anthropic.APIKey.Value(),
+			cfg.LLM.Anthropic.Model,
+			cfg.LLM.Timeout,
+			httpClient,
+		))
+	}
+	if cfg.LLM.Gemini.Configured() {
+		providers = append(providers, geminiclient.New(
+			cfg.LLM.Gemini.APIKey.Value(),
+			cfg.LLM.Gemini.Model,
+			cfg.LLM.Timeout,
+			httpClient,
+		))
+	}
+	chain := llm.NewChain(providers...)
 
 	svc := planservice.NewService(planservice.Deps{
 		Collector:  collector,
