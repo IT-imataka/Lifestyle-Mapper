@@ -121,6 +121,7 @@ func (s *Service) Generate(ctx context.Context, cond *model.SearchCondition) (*R
 		return nil, err
 	}
 
+	// instrument: before collector
 	store, sources, err := s.collector.Collect(ctx, cond)
 	if err != nil {
 		return nil, err
@@ -134,6 +135,7 @@ func (s *Service) Generate(ctx context.Context, cond *model.SearchCondition) (*R
 	var warnings []model.Warning
 	warnings = append(warnings, degradedWarnings(sources)...)
 
+	// instrument: before composeWithLLM
 	hyd, tl, verdict, llmMeta, err := s.composeWithLLM(ctx, cond, store)
 	if err != nil {
 		if !errors.Is(err, errLLMSkipped) {
