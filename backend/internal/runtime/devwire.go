@@ -42,17 +42,29 @@ func (r *InMemoryPlanRepository) Find(ctx context.Context, id model.PlanID) (*mo
 
 // Broadcaster publishes PlanEvent to subscribers.
 type Broadcaster struct {
-	mu   sync.Mutex
-	subs map[model.PlanID][]chan model.PlanEvent
+	mu      sync.Mutex
+	subs    map[model.PlanID][]chan model.PlanEvent
+	history map[model.PlanID][]model.PlanEvent
 }
 
 func NewBroadcaster() *Broadcaster {
-	return &Broadcaster{subs: make(map[model.PlanID][]chan model.PlanEvent)}
+	return &Broadcaster{
+		subs:    make(map[model.PlanID][]chan model.PlanEvent),
+		history: make(map[model.PlanID][]model.PlanEvent),
+	}
 }
 
 func (b *Broadcaster) Publish(ev model.PlanEvent) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	// Store in history (keep last 100 events per plan)
+	hist := b.history[ev.PlanID]
+	hist = append(hist, ev)
+	if len(hist) > 100 {
+		hist = hist[1:]
+	}
+	b.history[ev.PlanID] = hist
+
 	for _, ch := range b.subs[ev.PlanID] {
 		select {
 		case ch <- ev:
@@ -67,11 +79,46 @@ func (b *Broadcaster) Subscribe(ctx context.Context, id model.PlanID) (<-chan mo
 	ch := make(chan model.PlanEvent, 16)
 	b.mu.Lock()
 	b.subs[id] = append(b.subs[id], ch)
+	// Copy history for this subscriber
+	hist := make([]model.PlanEvent, len(b.history[id]))
+	copy(hist, b.history[id])
 	b.mu.Unlock()
 
 	out := make(chan model.PlanEvent)
 	go func() {
 		defer close(out)
+		// Send historical events first
+		for _, e := range hist {
+			select {
+			case <-ctx.Done():
+				b.mu.Lock()
+				arr := b.subs[id]
+				for i, c := range arr {
+					if c == ch {
+						arr = append(arr[:i], arr[i+1:]...)
+						break
+					}
+				}
+				b.subs[id] = arr
+				b.mu.Unlock()
+				return
+			case out <- e:
+				if e.Terminal() {
+					b.mu.Lock()
+					arr := b.subs[id]
+					for i, c := range arr {
+						if c == ch {
+							arr = append(arr[:i], arr[i+1:]...)
+							break
+						}
+					}
+					b.subs[id] = arr
+					b.mu.Unlock()
+					return
+				}
+			}
+		}
+		// Then listen for new events
 		for {
 			select {
 			case <-ctx.Done():
@@ -93,6 +140,16 @@ func (b *Broadcaster) Subscribe(ctx context.Context, id model.PlanID) (<-chan mo
 				}
 				out <- e
 				if e.Terminal() {
+					b.mu.Lock()
+					arr := b.subs[id]
+					for i, c := range arr {
+						if c == ch {
+							arr = append(arr[:i], arr[i+1:]...)
+							break
+						}
+					}
+					b.subs[id] = arr
+					b.mu.Unlock()
 					return
 				}
 			}
@@ -132,17 +189,22 @@ func (o *PlanOrchestrator) Create(ctx context.Context, cond *model.SearchConditi
 	}
 
 	o.b.Publish(model.NewStatusEvent(id, model.StatusQueued, time.Now()))
-
 	go func() {
+		// log: orchestrator start
+		o.b.Publish(model.NewStatusEvent(id, model.StatusCollecting, time.Now()))
+		// instrument: before Generate
 		o.b.Publish(model.NewStatusEvent(id, model.StatusCollecting, time.Now()))
 		res, err := o.svc.Generate(context.Background(), cond)
 		if err != nil {
+			// publish error and return
 			o.b.Publish(model.NewErrorEvent(id, err, time.Now()))
 			return
 		}
+		// publish sources
 		for _, s := range res.Sources {
 			o.b.Publish(model.NewSourceEvent(res.Plan.ID, s, time.Now()))
 		}
+		// publish final plan
 		o.b.Publish(model.NewPlanEvent(res.Plan, time.Now()))
 	}()
 	return id, model.StatusQueued, nil
