@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"log"
 	"sync"
 	"time"
 
@@ -182,29 +183,33 @@ func NewPlanOrchestrator(svc *planservice.Service, repo planservice.Repository, 
 
 func (o *PlanOrchestrator) Create(ctx context.Context, cond *model.SearchCondition) (model.PlanID, model.PlanStatus, error) {
 	id := model.NewPlanID()
+	log.Printf("[PlanOrchestrator.Create] Starting plan generation: planID=%s", id)
 	p := &model.Plan{ID: id, Status: model.StatusQueued, GeneratedAt: time.Now(), ExpiresAt: time.Now().Add(5 * time.Minute)}
 	if err := o.repo.Save(ctx, p); err != nil {
+		log.Printf("[PlanOrchestrator.Create] Initial plan save failed: %v", err)
 		o.b.Publish(model.NewErrorEvent(id, err, time.Now()))
 		return id, model.StatusQueued, err
 	}
 
 	o.b.Publish(model.NewStatusEvent(id, model.StatusQueued, time.Now()))
 	go func() {
-		// log: orchestrator start
+		log.Printf("[PlanOrchestrator.Create] Starting async generation for planID=%s", id)
 		o.b.Publish(model.NewStatusEvent(id, model.StatusCollecting, time.Now()))
 		// instrument: before Generate
-		o.b.Publish(model.NewStatusEvent(id, model.StatusCollecting, time.Now()))
 		res, err := o.svc.Generate(context.Background(), cond)
 		if err != nil {
+			log.Printf("[PlanOrchestrator.Create] Generation failed for planID=%s: %v", id, err)
 			// publish error and return
 			o.b.Publish(model.NewErrorEvent(id, err, time.Now()))
 			return
 		}
+		log.Printf("[PlanOrchestrator.Create] Generation completed for planID=%s, sources=%d", id, len(res.Sources))
 		// publish sources
 		for _, s := range res.Sources {
 			o.b.Publish(model.NewSourceEvent(res.Plan.ID, s, time.Now()))
 		}
 		// publish final plan
+		log.Printf("[PlanOrchestrator.Create] Publishing final plan for planID=%s, status=%s", id, res.Plan.Status)
 		o.b.Publish(model.NewPlanEvent(res.Plan, time.Now()))
 	}()
 	return id, model.StatusQueued, nil
