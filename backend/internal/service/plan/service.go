@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/taka/lifestyle-mapper/backend/internal/apperror"
@@ -124,11 +125,14 @@ func (s *Service) Generate(ctx context.Context, cond *model.SearchCondition) (*R
 	// instrument: before collector
 	store, sources, err := s.collector.Collect(ctx, cond)
 	if err != nil {
+		log.Printf("[plan.Generate] Collector error: %v", err)
 		return nil, err
 	}
 	if store == nil || store.Len() == 0 {
+		log.Printf("[plan.Generate] No candidates found")
 		return nil, apperror.New(apperror.CodeNoCandidatesFound, "").WithOp("plan.Generate")
 	}
+	log.Printf("[plan.Generate] Collector completed: %d candidates, sources=%v", store.Len(), sources)
 	// 以降 FactStore は読むだけ。**真実の源を後から書き換えさせない**。
 	store.Freeze()
 
@@ -139,18 +143,24 @@ func (s *Service) Generate(ctx context.Context, cond *model.SearchCondition) (*R
 	hyd, tl, verdict, llmMeta, err := s.composeWithLLM(ctx, cond, store)
 	if err != nil {
 		if !errors.Is(err, errLLMSkipped) {
+			log.Printf("[plan.Generate] LLM failed, falling back to rule-based: %v", err)
 			// 呼んで駄目だった場合だけ伝える。文章が無いことは機能の欠落ではない。
 			warnings = append(warnings, model.NewWarning(model.WarnLLMUnavailable, model.SeverityInfo, "",
 				"文章の生成ができなかったため、時系列のみを表示しています。"))
+		} else {
+			log.Printf("[plan.Generate] LLM skipped, using rule-based")
 		}
 		hyd, tl, verdict, err = s.composeByRule(cond, store)
 		if err != nil {
 			return nil, err
 		}
 		llmMeta = s.ruleBasedMeta()
+	} else {
+		log.Printf("[plan.Generate] LLM composition completed")
 	}
 
 	plan := s.assemble(cond, hyd, tl, verdict, append(warnings, hyd.Warnings...), sources)
+	log.Printf("[plan.Generate] Validator result: feasibility=%v, warnings=%d", verdict.Feasibility, len(plan.Warnings))
 	if s.repo != nil {
 		if err := s.repo.Save(ctx, plan); err != nil {
 			// 保存できなくても手元のプランは返せる。共有 URL が死ぬだけ。
