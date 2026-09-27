@@ -51,6 +51,58 @@ LLM の出力は「`candidateId` の参照＋文章」だけに絞り、Go が F
 
 ---
 
+# 補足：Pub/Sub（SSE）アーキテクチャ
+
+## 現在の実装（インメモリPub/Sub）
+
+SSEストリーム（`GET /v1/plans/{planId}/events`）は以下の構成で動作します：
+
+```
+PlanOrchestrator
+    ↓ Publish（イベント発行）
+Broadcaster（メモリ内の購読者管理）
+    ├─ 購読者リスト管理（チャネルを直接保持）
+    └─ イベント履歴バッファ（PlanIDごとに最新100件）
+    ↓ Subscribe（購読開始時に過去イベント復元）
+StreamController（SSE）
+    └─ クライアント（ブラウザ）
+```
+
+**重要な実装詳細**：
+- `Broadcaster` が `history map[PlanID][]PlanEvent` を保持し、購読前のイベントを復元
+- Subscribe時に履歴イベント → リアルタイムイベントの順で流す
+- 単一プロセス内のシンプルなPub/Subパターン
+
+**制限事項**：
+- インメモリ保存のため、プロセス再起動でイベント履歴が消失
+- 複数サーバでスケール時は購読者間で共有できない
+
+## 将来の検討：Topic抽象化による疎結合化
+
+スケール時の検討課題として、以下の構造への移行を提案：
+
+```go
+// Topic インターフェースを導入
+type Topic interface {
+    Publish(event PlanEvent)
+}
+
+// 実装の切り替え可能に
+type InMemoryTopic struct { ... }      // 開発用
+type RedisTopics struct { ... }        // 本番用（複数サーバ対応）
+```
+
+**変更のメリット**：
+- パブリッシャー（PlanOrchestrator）がTopicインターフェースのみに依存 → 疎結合
+- Redis Pub/Subに切り替えるだけで複数サーバ対応可能
+- Amazon SNSのような中間層概念により、実装の責任が明確化
+
+**判断基準**：
+- 現在：単一サーバ、SSEクライアント数が限定的 → インメモリで十分
+- スケール時：複数サーバ、大量クライアント対応 → Topic抽象化を実施
+
+---
+
 # 1. ディレクトリ構成
 
 ## 1-0. モノレポ全体
