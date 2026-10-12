@@ -105,6 +105,24 @@ func TestGenerateBuildsPlanFromLLMDraft(t *testing.T) {
 	}
 }
 
+func TestGenerateWithIDPreservesRequestedPlanID(t *testing.T) {
+	f := newFixture(t)
+	repo := newMemRepo()
+	requestedID := model.PlanID("pln_01M34V96V86J09BRWDK7W8PPWS")
+
+	res, err := newService(f, newFakeLLM(f), repo, okSources()).
+		GenerateWithID(context.Background(), f.cond, requestedID)
+	if err != nil {
+		t.Fatalf("GenerateWithID: %v", err)
+	}
+	if res.Plan.ID != requestedID {
+		t.Fatalf("plan ID = %s, want %s", res.Plan.ID, requestedID)
+	}
+	if repo.plans[requestedID] != res.Plan {
+		t.Fatal("generated plan was not saved under the requested ID")
+	}
+}
+
 // LLM に到達できなければルールベースで組む。**サービスは死なない**。
 func TestGenerateFallsBackToRuleBased(t *testing.T) {
 	f := newFixture(t)
