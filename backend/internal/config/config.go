@@ -132,7 +132,7 @@ type LLM struct {
 }
 
 type AnthropicLLM struct {
-	APIKey    Secret // ANTHROPIC_API_KEY
+	APIKey    Secret // LLM_ANTHROPIC_API_KEY
 	Model     string // ANTHROPIC_MODEL
 	MaxTokens int    // ANTHROPIC_MAX_TOKENS
 	// Effort は構造化出力の思考量。候補の選択と作文が主なので medium で足りる。
@@ -141,7 +141,7 @@ type AnthropicLLM struct {
 
 // Gemini は Anthropic が落ちたときのフォールバック先。
 type GeminiLLM struct {
-	APIKey Secret // GEMINI_API_KEY
+	APIKey Secret // LLM_GEMINI_API_KEY
 	Model  string // GEMINI_MODEL
 }
 
@@ -235,13 +235,13 @@ func Load() (*Config, error) {
 		Enabled: llmEnabled,
 		Timeout: l.dur("LLM_TIMEOUT", 30*time.Second),
 		Anthropic: AnthropicLLM{
-			APIKey:    l.secret("ANTHROPIC_API_KEY", false),
+			APIKey:    l.secret("LLM_ANTHROPIC_API_KEY", false),
 			Model:     l.str("ANTHROPIC_MODEL", "claude-opus-5"),
 			MaxTokens: l.intv("ANTHROPIC_MAX_TOKENS", 8000),
 			Effort:    l.str("ANTHROPIC_EFFORT", "medium"),
 		},
 		Gemini: GeminiLLM{
-			APIKey: l.secret("GEMINI_API_KEY", false),
+			APIKey: l.secret("LLM_GEMINI_API_KEY", false),
 			// 既定値を置かないのは、設計書が型番を指定していない提供元だから。
 			// 使うなら型番を明示させる（勝手な既定値で存在しないモデルを叩かせない）。
 			Model: l.str("GEMINI_MODEL", ""),
@@ -290,10 +290,10 @@ func (c *Config) validate() []string {
 	// LLM を使うなら、少なくとも 1 つの提供元が要る。
 	if c.LLM.Enabled {
 		if c.LLM.Anthropic.APIKey.Empty() && !c.LLM.Gemini.Configured() {
-			p = append(p, "ANTHROPIC_API_KEY / GEMINI_API_KEY: LLM_ENABLED=true なら少なくとも一方が必要です（文章生成を止めるなら LLM_ENABLED=false）")
+			p = append(p, "LLM_ANTHROPIC_API_KEY / LLM_GEMINI_API_KEY: LLM_ENABLED=true なら少なくとも一方が必要です（文章生成を止めるなら LLM_ENABLED=false）")
 		}
 		if c.LLM.Gemini.Configured() && c.LLM.Gemini.Model == "" {
-			p = append(p, "GEMINI_MODEL: GEMINI_API_KEY を設定するならモデル名も必要です")
+			p = append(p, "GEMINI_MODEL: LLM_GEMINI_API_KEY を設定するならモデル名も必要です")
 		}
 		if c.LLM.Anthropic.MaxTokens < 1000 {
 			p = append(p, "ANTHROPIC_MAX_TOKENS: 1000 以上で指定してください（構造化出力が途中で切れます）")
