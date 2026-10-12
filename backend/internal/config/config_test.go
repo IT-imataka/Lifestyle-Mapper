@@ -14,11 +14,11 @@ func setMinimum(t *testing.T) {
 	t.Setenv("REDIS_URL", "redis://localhost:6379")
 	t.Setenv("GOOGLE_MAPS_API_KEY", "dummy-google-key")
 	t.Setenv("RAKUTEN_APPLICATION_ID", "dummy-rakuten-id")
-	t.Setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
+	t.Setenv("LLM_ANTHROPIC_API_KEY", "dummy-anthropic-key")
 	// 他のテストや実行環境からの漏れ込みを断つ。
 	for _, k := range []string{
 		"APP_ENV", "APP_BASE_URL", "PORT", "CACHE_ENABLED", "LLM_ENABLED",
-		"GEMINI_API_KEY", "GEMINI_MODEL", "RAKUTEN_AFFILIATE_ID", "PHOTO_PROXY_BASE_URL",
+		"LLM_GEMINI_API_KEY", "GEMINI_MODEL", "RAKUTEN_AFFILIATE_ID", "PHOTO_PROXY_BASE_URL",
 		"PLAN_MAX_CANDIDATES", "PLAN_TTL", "CORS_ORIGINS", "SERVER_READ_TIMEOUT",
 		"ANTHROPIC_MODEL", "LLM_MAX_REPAIR_ATTEMPTS", "RAKUTEN_QPS",
 	} {
@@ -112,14 +112,14 @@ func TestSecretsAreRedacted(t *testing.T) {
 func TestLLMKeyRequirement(t *testing.T) {
 	// LLM を使うなら提供元が最低 1 つ要る。
 	setMinimum(t)
-	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("LLM_ANTHROPIC_API_KEY", "")
 
-	if _, err := Load(); !strings.Contains(problems(t, err), "ANTHROPIC_API_KEY / GEMINI_API_KEY") {
+	if _, err := Load(); !strings.Contains(problems(t, err), "LLM_ANTHROPIC_API_KEY / LLM_GEMINI_API_KEY") {
 		t.Error("LLM のキー欠落が報告されていません")
 	}
 
 	// Gemini だけでも成立する（フォールバック運用）。
-	t.Setenv("GEMINI_API_KEY", "dummy-gemini-key")
+	t.Setenv("LLM_GEMINI_API_KEY", "dummy-gemini-key")
 	t.Setenv("GEMINI_MODEL", "gemini-x")
 	if _, err := Load(); err != nil {
 		t.Errorf("Gemini のみの構成が弾かれました: %v", err)
@@ -132,7 +132,7 @@ func TestLLMKeyRequirement(t *testing.T) {
 	}
 
 	// LLM 自体を切れば鍵は不要。文章生成なしでもサービスは動く。
-	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("LLM_GEMINI_API_KEY", "")
 	t.Setenv("LLM_ENABLED", "false")
 	cfg, err := Load()
 	if err != nil {
