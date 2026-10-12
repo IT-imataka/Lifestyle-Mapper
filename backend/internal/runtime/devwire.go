@@ -196,7 +196,7 @@ func (o *PlanOrchestrator) Create(ctx context.Context, cond *model.SearchConditi
 		log.Printf("[PlanOrchestrator.Create] Starting async generation for planID=%s", id)
 		o.b.Publish(model.NewStatusEvent(id, model.StatusCollecting, time.Now()))
 		// instrument: before Generate
-		res, err := o.svc.Generate(context.Background(), cond)
+		res, err := o.svc.GenerateWithID(context.Background(), cond, id)
 		if err != nil {
 			log.Printf("[PlanOrchestrator.Create] Generation failed for planID=%s: %v", id, err)
 			// publish error and return
@@ -206,7 +206,7 @@ func (o *PlanOrchestrator) Create(ctx context.Context, cond *model.SearchConditi
 		log.Printf("[PlanOrchestrator.Create] Generation completed for planID=%s, sources=%d", id, len(res.Sources))
 		// publish sources
 		for _, s := range res.Sources {
-			o.b.Publish(model.NewSourceEvent(res.Plan.ID, s, time.Now()))
+			o.b.Publish(model.NewSourceEvent(id, s, time.Now()))
 		}
 		// publish final plan
 		log.Printf("[PlanOrchestrator.Create] Publishing final plan for planID=%s, status=%s", id, res.Plan.Status)

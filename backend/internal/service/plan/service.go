@@ -110,6 +110,19 @@ var errLLMSkipped = errors.New("LLM をスキップしました")
 
 // Generate はプランを 1 本生成する。
 func (s *Service) Generate(ctx context.Context, cond *model.SearchCondition) (*Result, error) {
+	return s.generate(ctx, cond, "")
+}
+
+// GenerateWithID は呼び出し側で採番した ID を使ってプランを生成する。
+// POST の応答・SSE 購読・永続化で同じ ID を共有するために使う。
+func (s *Service) GenerateWithID(ctx context.Context, cond *model.SearchCondition, id model.PlanID) (*Result, error) {
+	if !id.Valid() {
+		return nil, apperror.Internal(fmt.Errorf("plan ID が不正です"), "plan.GenerateWithID")
+	}
+	return s.generate(ctx, cond, id)
+}
+
+func (s *Service) generate(ctx context.Context, cond *model.SearchCondition, id model.PlanID) (*Result, error) {
 	if cond == nil {
 		return nil, apperror.Internal(errors.New("検索条件が nil です"), "plan.Generate")
 	}
@@ -159,7 +172,7 @@ func (s *Service) Generate(ctx context.Context, cond *model.SearchCondition) (*R
 		log.Printf("[plan.Generate] LLM composition completed")
 	}
 
-	plan := s.assemble(cond, hyd, tl, verdict, append(warnings, hyd.Warnings...), sources)
+	plan := s.assemble(cond, hyd, tl, verdict, append(warnings, hyd.Warnings...), sources, id)
 	log.Printf("[plan.Generate] Validator result: feasibility=%v, warnings=%d", verdict.Feasibility, len(plan.Warnings))
 	if s.repo != nil {
 		if err := s.repo.Save(ctx, plan); err != nil {
@@ -282,12 +295,14 @@ func (s *Service) ruleBasedMeta() model.LLMMeta {
 // assemble は確定した時系列を Plan にまとめる。
 // summary は **Go が確定した事実のみ**で、LLM は書き込めない。
 func (s *Service) assemble(cond *model.SearchCondition, hyd *Hydrated, tl model.Timeline,
-	verdict Verdict, warnings []model.Warning, sources []model.SourceStatus) *model.Plan {
+	verdict Verdict, warnings []model.Warning, sources []model.SourceStatus, id model.PlanID) *model.Plan {
 
 	now := s.now()
 	walk, meters := tl.TotalWalk()
 
-	id := model.NewPlanID()
+	if id == "" {
+		id = model.NewPlanID()
+	}
 	p := &model.Plan{
 		ID:           id,
 		Status:       planStatus(sources),
